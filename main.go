@@ -8,16 +8,18 @@ import (
     "os/signal"
     "syscall"
     "strings"
+    "net"
     "net/http"
     "context"
 )
 
-// TODO automatically parse `ip addr show $IFACE`
-const IP_ADDRESS = "192.168.43.227"
+// leave empty to parse automatically
+var IP_ADDRESS = ""
 const HTTP_PORT = 80
+// default: wlan0
 const IFACE = "wlan0"
-// /system/bin/iptables
-const IPTABLES_BINARY = "iptables"
+// default: /system/bin/iptables
+const IPTABLES_BINARY = "/system/bin/iptables"
 
 // when an authenticated IP accesses any route, automatically forward it to a public website
 // (firefox needs this for /success.txt, otherwise it keeps showing the auth page)
@@ -184,6 +186,28 @@ func run(command string) ([]byte, error) {
 }
 
 func main() {
+    if IP_ADDRESS == "" {
+        log.Println("[main] looking up IP...")
+        iface, err := net.InterfaceByName(IFACE)
+        addrs, err := iface.Addrs()
+        if err != nil {
+            log.Fatal(err)
+        }
+        for _, a := range addrs {
+            switch v := a.(type) {
+            case *net.IPAddr:
+                fmt.Printf("[ip-addr] %v : %s (%s)\n", iface.Name, v, v.IP.DefaultMask())
+            case *net.IPNet:
+                fmt.Printf("[ip-net] %v : %s [%v/%v]\n", iface.Name, v, v.IP, v.Mask)
+                if v.IP.DefaultMask() != nil {
+                    IP_ADDRESS = fmt.Sprintf("%s", v.IP)
+                }
+            }
+        }
+        if IP_ADDRESS == "" {
+            log.Fatalf("Unable to access ip address")
+        }
+    }
     srv := &http.Server{Addr: fmt.Sprintf(":%d", HTTP_PORT)}
 
     signals = make(chan os.Signal, 1)
