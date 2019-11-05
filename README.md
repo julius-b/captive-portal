@@ -19,6 +19,8 @@ $ iptables -t nat -A PREROUTING -i $iface -p tcp --dport 80 -j DNAT --to-destina
 - dashboard for collected data
 - record http requests
 - when a authenticated client access the server (/success.txt), redirect to a public webpage
+  - for firefox to stop showing the network prompt, it needs to receive the correct page -> don't intercept success.txt
+    - in PREROUTING, ACCEPT immediately
 
 ## Improvements
 - DNS hijacking (forward udp/tcp 53 to this host, maybe try dnsmasq)

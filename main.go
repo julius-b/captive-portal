@@ -17,15 +17,26 @@ const IP_ADDRESS = "192.168.43.227"
 const HTTP_PORT = 80
 const IFACE = "wlan0"
 // /system/bin/iptables
-const IPTABLES_BINARY = "/system/bin/iptables"
+const IPTABLES_BINARY = "iptables"
 
-// TODO when an authenticated IP accesses any route, automatically forward it to a public website
+// when an authenticated IP accesses any route, automatically forward it to a public website
 // (firefox needs this for /success.txt, otherwise it keeps showing the auth page)
+// TODO elimintate duplicates
 var authenticatedIPs []string
+var emails []string
+
+var signals chan os.Signal
 
 func root(w http.ResponseWriter, r *http.Request) {
     ip := strings.Split(r.RemoteAddr, ":")[0]
     log.Printf("[root] <%s> path: %s", ip, r.URL.Path)
+
+    if contains(authenticatedIPs, ip) {
+        log.Printf("[root] <%s> already authenticated", ip)
+        http.Redirect(w, r, "https://google.com", http.StatusSeeOther)
+        return
+    }
+
     http.ServeFile(w, r, "login.html")
 }
 
@@ -36,8 +47,11 @@ func auth(w http.ResponseWriter, r *http.Request) {
     userEmail := r.Form.Get("user_email")
 
     log.Printf("[auth] <%s> authenticating: '%s'...", ip, userEmail)
+    emails = append(emails, userEmail)
 
-    cmd := fmt.Sprintf("%s -t nat -I PREROUTING 1 -s %s -j ACCEPT", IPTABLES_BINARY, ip)
+    authenticatedIPs = append(authenticatedIPs, ip)
+
+    cmd := fmt.Sprintf("%s -t nat -I PREROUTING -s %s -j ACCEPT", IPTABLES_BINARY, ip)
     out, err := run(cmd)
     log.Printf("[auth] iptables: %s", out)
     if err != nil {
@@ -53,16 +67,78 @@ func auth(w http.ResponseWriter, r *http.Request) {
     http.Redirect(w, r, "https://google.com", http.StatusSeeOther)
 }
 
-// TODO remove from array + iptables
 func deauth(w http.ResponseWriter, r *http.Request) {
+    ip := strings.Split(r.RemoteAddr, ":")[0]
+
+    log.Printf("[deauth] <%s> deauthenticating...", ip)
+
+    i := index(authenticatedIPs, ip)
+    if i != -1 {
+        authenticatedIPs = append(authenticatedIPs[:i], authenticatedIPs[i+1:]...)
+    }
+
+    cmd := fmt.Sprintf("%s -t nat -D PREROUTING -s %s -j ACCEPT", IPTABLES_BINARY, ip)
+    out, err := run(cmd)
+    log.Printf("[deauth] iptables: %s", out)
+    if err != nil {
+        log.Printf("[deauth] iptables: err - %v", err)
+        fmt.Fprintf(w, "Something went wrong")
+        return
+    }
+    
+    fmt.Fprintf(w, "Deauthenticated")
 }
 
-// TODO remove from array + iptables
 func deauthAll(w http.ResponseWriter, r *http.Request) {
+    ip := strings.Split(r.RemoteAddr, ":")[0]
+
+    log.Printf("[deauth-all] <%s> deauthenticating all...", ip)
+    if !contains(authenticatedIPs, ip) {
+        log.Printf("[deauth-all] <%s> err: not authenticated", ip)
+        fmt.Fprintf(w, "Not authenticated")
+        return
+    }
+    log.Printf("[deauth-all] <%s> - deauthenticating...", ip)
+    deauthAllImpl()
+    
+    authenticatedIPs = make([]string, 0)
 }
 
-// TODO hold-and-catch-fire
+func deauthAllImpl() {
+    for k, v := range authenticatedIPs {
+        log.Printf("[deauth-all] %d: %s - deauthenticating...", k, v)
+        cmd := fmt.Sprintf("%s -t nat -D PREROUTING -s %s -j ACCEPT", IPTABLES_BINARY, v)
+        out, err := run(cmd)
+        log.Printf("[deauth-all] iptables: %s", out)
+        if err != nil {
+            log.Printf("[deauth-all] iptables: err - %v", err)
+        }
+    }
+}
+
 func shutdown(w http.ResponseWriter, r *http.Request) {
+    ip := strings.Split(r.RemoteAddr, ":")[0]
+
+    log.Printf("[shutdown] <%s> shutting down...", ip)
+    if !contains(authenticatedIPs, ip) {
+        log.Printf("[shutdown] <%s> err: not authenticated", ip)
+        fmt.Fprintf(w, "Not authenticated")
+        return
+    }
+
+    signals <- os.Interrupt
+}
+
+func info(w http.ResponseWriter, r *http.Request) {
+    fmt.Fprintf(w, "authenticatedIPs: %v\nemails: %v", authenticatedIPs, emails)
+}
+
+// does not grant actual access
+func fakeAuth(w http.ResponseWriter, r *http.Request) {
+    ip := strings.Split(r.RemoteAddr, ":")[0]
+
+    log.Printf("[fake-auth] <%s> authenticating...", ip)
+    authenticatedIPs = append(authenticatedIPs, ip)
 }
 
 func setupIP() {
@@ -110,15 +186,16 @@ func run(command string) ([]byte, error) {
 func main() {
     srv := &http.Server{Addr: fmt.Sprintf(":%d", HTTP_PORT)}
 
-    signals := make(chan os.Signal, 1)
+    signals = make(chan os.Signal, 1)
     done := make(chan bool, 1)
     go func() {
         sig := <-signals
         log.Printf("Signal: %v", sig)
         dismantleIP()
+        deauthAllImpl()
         if err := srv.Shutdown(context.TODO()); err != nil {
             panic(err)
-        }    
+        }
         done <- true
     }()
 
@@ -127,6 +204,11 @@ func main() {
     setupIP()
 
     http.HandleFunc("/auth", auth)
+    http.HandleFunc("/deauth", deauth)
+    http.HandleFunc("/deauth-all", deauthAll)
+    http.HandleFunc("/info", info)
+    http.HandleFunc("/fake-auth", fakeAuth)
+    http.HandleFunc("/shutdown", shutdown)
     http.HandleFunc("/", root)
 
     go func() {
